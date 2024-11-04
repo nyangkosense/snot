@@ -8,12 +8,14 @@
 #include <wayland-client.h>
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>  
+#include <fcntl.h>  
+#include <sys/stat.h>
+
 #include "protocols/wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "config.h"
 #include "snot.h"
 #include "dbus.h"
-#include <fcntl.h>  
-#include <sys/stat.h>  
+
 
 static struct wl_display *display;
 static struct wl_registry *registry;
@@ -29,7 +31,7 @@ static void remove_notification(int index);
 
 static void
 die(const char *msg) {
-    fprintf(stderr, "notifyd: %s\n", msg);
+    fprintf(stderr, "snot: %s\n", msg);
     exit(1);
 }
 
@@ -58,22 +60,19 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_global_remove,
 };
 
-
 static void
 layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
                        uint32_t serial, uint32_t width, uint32_t height) {
     Notification *n = data;
     
+    printf("Configuring surface with %dx%d\n", width, height);
+    
     zwlr_layer_surface_v1_ack_configure(surface, serial);
     
-    n->configured = true;
-    
-    n->width = width > 0 ? width : NOTIFICATION_WIDTH;
-    n->height = height > 0 ? height : NOTIFICATION_HEIGHT;
-
-    printf("Surface configured: %dx%d\n", n->width, n->height);
-    
-    draw_notification(n);
+    if (!n->configured) {
+        n->configured = true;
+        draw_notification(n);
+    }
 }
 
 static void
@@ -92,12 +91,10 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
 
 static void
 create_notification_surface(Notification *n) {
+    printf("Creating notification for: '%s' - '%s'\n", n->summary, n->body);
 
-    n->surface = NULL;
-    n->layer_surface = NULL;
-    n->cairo = NULL;
-    n->cairo_surface = NULL;
-    n->configured = false;
+    int width = NOTIFICATION_WIDTH;
+    int height = NOTIFICATION_HEIGHT;
 
     n->surface = wl_compositor_create_surface(compositor);
     if (!n->surface) {
@@ -115,60 +112,7 @@ create_notification_surface(Notification *n) {
         return;
     }
 
-    zwlr_layer_surface_v1_add_listener(n->layer_surface,
-                                     &layer_surface_listener, n);
-
-    zwlr_layer_surface_v1_set_size(n->layer_surface,
-                                  NOTIFICATION_WIDTH,
-                                  NOTIFICATION_HEIGHT);
-
-    uint32_t anchor = 0;
-    int margin_top = 0;
-    int margin_right = 0;
-    int margin_bottom = 0;
-    int margin_left = 0;
-
-    if (POSITION == 0) {  
-        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
-        margin_top = SPACING;
-    } else {  
-        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
-        margin_bottom = SPACING;
-    }
-
-    switch (ALIGNMENT) {
-        case 0:  
-            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
-            margin_left = SPACING;
-            break;
-        case 1:
-            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
-            break;
-        case 2:  
-            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
-            margin_right = SPACING;
-            break;
-    }
-
-    int stack_offset = notification_count * (NOTIFICATION_HEIGHT + SPACING);
-    if (POSITION == 0) {  
-        margin_top += stack_offset;
-    } else {  
-        margin_bottom += stack_offset;
-    }
-
-    zwlr_layer_surface_v1_set_anchor(n->layer_surface, anchor);
-    zwlr_layer_surface_v1_set_margin(n->layer_surface,
-                                    margin_top,
-                                    margin_right,
-                                    margin_bottom,
-                                    margin_left);
-
-    zwlr_layer_surface_v1_set_exclusive_zone(n->layer_surface, -1);
-
-    n->cairo_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
-                                                NOTIFICATION_WIDTH,
-                                                NOTIFICATION_HEIGHT);
+    n->cairo_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
     if (cairo_surface_status(n->cairo_surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Failed to create Cairo surface\n");
         zwlr_layer_surface_v1_destroy(n->layer_surface);
@@ -185,56 +129,171 @@ create_notification_surface(Notification *n) {
         return;
     }
 
+    PangoLayout *layout = pango_cairo_create_layout(n->cairo);
+    PangoFontDescription *desc = pango_font_description_from_string(FONT);
+    pango_layout_set_font_description(layout, desc);
+    pango_font_description_free(desc);
+
+    int max_text_width = NOTIFICATION_WIDTH - (2 * PADDING);
+    pango_layout_set_width(layout, max_text_width * PANGO_SCALE);
+    pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+
+    int text_width, text_height;
+    int total_height = 0;
+
+    if (n->summary) {
+        pango_layout_set_text(layout, n->summary, -1);
+        pango_layout_get_pixel_size(layout, &text_width, &text_height);
+        total_height = text_height;
+        width = MAX(width, text_width + (2 * PADDING));
+    }
+
+    if (n->body) {
+        pango_layout_set_text(layout, n->body, -1);
+        pango_layout_get_pixel_size(layout, &text_width, &text_height);
+        total_height += text_height + PADDING;
+        width = MAX(width, text_width + (2 * PADDING));
+    }
+
+    g_object_unref(layout);
+
+    height = MAX(NOTIFICATION_HEIGHT, total_height + (2 * PADDING));
+    width = MIN(MAX(NOTIFICATION_WIDTH, width), NOTIFICATION_MAX_WIDTH);
+
+    if (width != NOTIFICATION_WIDTH || height != NOTIFICATION_HEIGHT) {
+        cairo_destroy(n->cairo);
+        cairo_surface_destroy(n->cairo_surface);
+        
+        n->cairo_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+        n->cairo = cairo_create(n->cairo_surface);
+    }
+
+    n->width = width;
+    n->height = height;
+
+    zwlr_layer_surface_v1_add_listener(n->layer_surface,
+                                     &layer_surface_listener, n);
+
+    zwlr_layer_surface_v1_set_size(n->layer_surface, width, height);
+
+    uint32_t anchor = 0;
+    int margin_top = 0;
+    int margin_right = 0;
+    int margin_bottom = 0;
+    int margin_left = 0;
+
+    if (POSITION == 0) {  // top
+        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+        margin_top = SPACING;
+    } else {  // bottom
+        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+        margin_bottom = SPACING;
+    }
+
+    switch (ALIGNMENT) {
+        case 0:  // left
+            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
+            margin_left = SPACING;
+            break;
+        case 1:  // center
+            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | 
+                     ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+            break;
+        case 2:  // right
+            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+            margin_right = SPACING;
+            break;
+    }
+
+    int stack_offset = notification_count * (height + SPACING);
+    if (POSITION == 0) {
+        margin_top += stack_offset;
+    } else {
+        margin_bottom += stack_offset;
+    }
+
+    zwlr_layer_surface_v1_set_anchor(n->layer_surface, anchor);
+    zwlr_layer_surface_v1_set_margin(n->layer_surface,
+                                    margin_top,
+                                    margin_right,
+                                    margin_bottom,
+                                    margin_left);
+
+    zwlr_layer_surface_v1_set_exclusive_zone(n->layer_surface, -1);
+
+    n->configured = false;
+
     wl_surface_commit(n->surface);
 
-    printf("Notification surface created: pos=%s align=%s offset=%d\n",
+    printf("Notification surface created: pos=%s align=%s size=%dx%d offset=%d\n",
            POSITION == 0 ? "top" : "bottom",
            ALIGNMENT == 0 ? "left" : (ALIGNMENT == 1 ? "center" : "right"),
-           stack_offset);
+           width, height, stack_offset);
 }
 
 static void
 draw_notification(Notification *n) {
-    if (!n->configured) {
-        printf("Skipping draw, surface not configured yet\n");
+
+    if (!n->cairo || !n->cairo_surface) {
+        fprintf(stderr, "No cairo surface available\n");
         return;
     }
-
     cairo_t *cr = n->cairo;
-    unsigned int r, g, b;
 
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     cairo_restore(cr);
 
-    sscanf(BACKGROUND_COLOR, "#%02x%02x%02x", &r, &g, &b);
-    cairo_set_source_rgba(cr, r/255.0, g/255.0, b/255.0, 0.9);
-    cairo_rectangle(cr, 0, 0, n->width, n->height);
-    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.133, 0.133, 0.133, 0.9);
+    cairo_paint(cr);
 
-    sscanf(BORDER_COLOR, "#%02x%02x%02x", &r, &g, &b);
-    cairo_set_source_rgb(cr, r/255.0, g/255.0, b/255.0);
+    cairo_set_source_rgb(cr, 0.0, 0.337, 0.467);
     cairo_set_line_width(cr, BORDER_WIDTH);
-    cairo_rectangle(cr, BORDER_WIDTH/2.0, BORDER_WIDTH/2.0,
-                   n->width - BORDER_WIDTH, n->height - BORDER_WIDTH);
+    cairo_rectangle(cr, 0, 0, n->width, n->height);
     cairo_stroke(cr);
-
+    
     PangoLayout *layout = pango_cairo_create_layout(cr);
     PangoFontDescription *desc = pango_font_description_from_string(FONT);
     pango_layout_set_font_description(layout, desc);
     pango_font_description_free(desc);
 
-    sscanf(FOREGROUND_COLOR, "#%02x%02x%02x", &r, &g, &b);
-    cairo_set_source_rgb(cr, r/255.0, g/255.0, b/255.0);
+    pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
 
-    pango_layout_set_text(layout, n->summary, -1);
-    cairo_move_to(cr, PADDING, PADDING);
-    pango_cairo_show_layout(cr, layout);
+    int total_height = 0;
+    int summary_height = 0;
+    int body_height = 0;
+    int text_width;
+
+    pango_layout_set_width(layout, (n->width - 2 * PADDING) * PANGO_SCALE);
+    pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+
+    if (n->summary) {
+        pango_layout_set_text(layout, n->summary, -1);
+        pango_layout_get_pixel_size(layout, &text_width, &summary_height);
+        total_height += summary_height;
+    }
 
     if (n->body) {
         pango_layout_set_text(layout, n->body, -1);
-        cairo_move_to(cr, PADDING, PADDING * 2 + 15);  
+        pango_layout_get_pixel_size(layout, &text_width, &body_height);
+        total_height += body_height + (PADDING/2);  
+    }
+
+    int y_offset = (n->height - total_height) / 2;
+
+    if (n->summary) {
+        printf("Drawing summary: %s\n", n->summary);
+        cairo_set_source_rgb(cr, 0.733, 0.733, 0.733);
+        pango_layout_set_text(layout, n->summary, -1);
+        cairo_move_to(cr, PADDING, y_offset);
+        pango_cairo_show_layout(cr, layout);
+    }
+
+    if (n->body) {
+        printf("Drawing body: %s\n", n->body);
+        pango_layout_set_text(layout, n->body, -1);
+        cairo_move_to(cr, PADDING, y_offset + summary_height + (PADDING/2));
         pango_cairo_show_layout(cr, layout);
     }
 
@@ -242,8 +301,8 @@ draw_notification(Notification *n) {
 
     int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, n->width);
     int size = stride * n->height;
-    
-    char tmp[] = "/tmp/notifyd-XXXXXX";
+
+    char tmp[] = "/tmp/snot-XXXXXX";
     int fd = mkstemp(tmp);
     if (fd < 0) {
         fprintf(stderr, "Failed to create temporary file\n");
@@ -268,19 +327,20 @@ draw_notification(Notification *n) {
 
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
     struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,
-                                                        n->width, n->height,
-                                                        stride,
-                                                        WL_SHM_FORMAT_ARGB8888);
-    
+                                                       n->width, n->height,
+                                                       stride,
+                                                       WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
-    
+
     wl_surface_attach(n->surface, buffer, 0, 0);
     wl_surface_damage_buffer(n->surface, 0, 0, n->width, n->height);
     wl_surface_commit(n->surface);
 
     wl_buffer_destroy(buffer);
     munmap(data, size);
+
+    printf("Drawing complete\n");
 }
 
 void
@@ -288,7 +348,10 @@ add_notification(const char *summary, const char *body,
                 const char *app_name, uint32_t replaces_id,
                 uint32_t expire_timeout) {
     Notification *n;
+    
+    printf("Received notification: '%s' - '%s'\n", summary, body);
 
+    /* Handle replacement if applicable */
     if (replaces_id > 0) {
         for (int i = 0; i < notification_count; i++) {
             if (notifications[i].replaces_id == replaces_id) {
@@ -304,18 +367,59 @@ add_notification(const char *summary, const char *body,
     if (notification_count >= MAX_NOTIFICATIONS)
         return;
     n = &notifications[notification_count++];
-    create_notification_surface(n);
+
+    n->surface = NULL;
+    n->layer_surface = NULL;
+    n->cairo_surface = NULL;
+    n->cairo = NULL;
+    n->configured = false;
+    n->width = NOTIFICATION_WIDTH;
+    n->height = NOTIFICATION_HEIGHT;
 
 replace:
-    n->summary = strdup(summary);
+
+    n->summary = summary ? strdup(summary) : NULL;
     n->body = body ? strdup(body) : NULL;
-    n->app_name = strdup(app_name);
+    n->app_name = app_name ? strdup(app_name) : NULL;
     n->replaces_id = replaces_id;
     n->expire_timeout = expire_timeout;
     n->start_time = time(NULL) * 1000;
     n->opacity = 1.0;
 
-    draw_notification(n);
+    create_notification_surface(n);
+}
+
+static void
+calculate_text_dimensions(cairo_t *cr, const char *summary, const char *body,
+                         int *width, int *height) {
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *desc = pango_font_description_from_string(FONT);
+    pango_layout_set_font_description(layout, desc);
+    
+    pango_layout_set_width(layout, (NOTIFICATION_WIDTH - 2 * PADDING) * PANGO_SCALE);
+    pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+
+    int text_width, text_height;
+    int total_height = 0;
+    int max_width = 0;
+
+    pango_layout_set_text(layout, summary, -1);
+    pango_layout_get_pixel_size(layout, &text_width, &text_height);
+    total_height = text_height;
+    max_width = text_width;
+
+    if (body) {
+        pango_layout_set_text(layout, body, -1);
+        pango_layout_get_pixel_size(layout, &text_width, &text_height);
+        total_height += text_height + PADDING; 
+        max_width = MAX(max_width, text_width);
+    }
+
+    *width = max_width + (2 * PADDING);
+    *height = total_height + (2 * PADDING);
+
+    g_object_unref(layout);
+    pango_font_description_free(desc);
 }
 
 static void
@@ -329,7 +433,7 @@ remove_notification(int index) {
         zwlr_layer_surface_v1_destroy(n->layer_surface);
         n->layer_surface = NULL;
     }
-
+    
     if (n->surface) {
         wl_surface_destroy(n->surface);
         n->surface = NULL;
@@ -339,7 +443,7 @@ remove_notification(int index) {
         cairo_destroy(n->cairo);
         n->cairo = NULL;
     }
-
+    
     if (n->cairo_surface) {
         cairo_surface_destroy(n->cairo_surface);
         n->cairo_surface = NULL;
@@ -354,26 +458,6 @@ remove_notification(int index) {
     }
 
     notification_count--;
-
-    for (int i = 0; i < notification_count; i++) {
-        if (notifications[i].configured && notifications[i].layer_surface) {
-            int stack_offset = i * (NOTIFICATION_HEIGHT + SPACING);
-            if (POSITION == 0) {  
-                zwlr_layer_surface_v1_set_margin(notifications[i].layer_surface,
-                                               SPACING + stack_offset,
-                                               ALIGNMENT == 2 ? SPACING : 0,
-                                               0,
-                                               ALIGNMENT == 0 ? SPACING : 0);
-            } else {  
-                zwlr_layer_surface_v1_set_margin(notifications[i].layer_surface,
-                                               0,
-                                               ALIGNMENT == 2 ? SPACING : 0,
-                                               SPACING + stack_offset,
-                                               ALIGNMENT == 0 ? SPACING : 0);
-            }
-            wl_surface_commit(notifications[i].surface);
-        }
-    }
 }
 
 int

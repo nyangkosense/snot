@@ -1,7 +1,7 @@
 snot - suckless notification daemon
 ==================================
 
-snot is a simple notification daemon for Wayland compositors implementing the 
+snot is a small, simple notification daemon for Wayland compositors implementing the 
 layer-shell protocol.
 
 Requirements
@@ -11,6 +11,17 @@ Requirements
 * cairo
 * pango
 * dbus
+
+- if you are not on systemd, you might need to manually start a dbus user session:
+
+Start D-Bus session daemon:
+---------------------------
+dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --nofork --print-address &
+
+Export D-Bus session address for other applications:
+----------------------------------------------------
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus
+
 
 Installation
 -----------

@@ -1,5 +1,5 @@
-#ifndef NOTIFYD_H
-#define NOTIFYD_H
+#ifndef SNOT_H
+#define SNOT_H
 
 #include <wayland-client.h>
 #include <cairo/cairo.h>
@@ -21,8 +21,7 @@ typedef struct {
     float opacity;
     cairo_surface_t *cairo_surface;
     cairo_t *cairo;
-    struct wl_callback *frame_callback;
-    bool configured; 
+    bool configured;
 } Notification;
 
 void add_notification(const char *summary, const char *body,

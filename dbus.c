@@ -56,7 +56,7 @@ method_get_server_information(DBusConnection *conn, DBusMessage *msg) {
         return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
     const char *name = "snot";
-    const char *vendor = "suckless";
+    const char *vendor = "snot";
     const char *version = "1.0";
     const char *spec_version = "1.2";
 
