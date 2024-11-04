@@ -1,4 +1,4 @@
-snot - suckless notification daemon
+snot - simple notification daemon
 ==================================
 
 snot is a small, simple notification daemon for Wayland compositors implementing the 
