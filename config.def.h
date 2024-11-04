@@ -10,7 +10,7 @@
 #define BACKGROUND_COLOR "#222222"        /* background color in hex */
 #define FOREGROUND_COLOR "#bbbbbb"        /* text color in hex */
 #define BORDER_COLOR "#005577"            /* border color in hex */
-#define FONT "LiberationMono 10"               /* font name and size */
+#define FONT "Liberation Mono 10"               /* font name and size */
 
 /* behavior */
 #define DURATION 3000                     /* notification display duration in ms */

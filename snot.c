@@ -35,18 +35,18 @@ die(const char *msg) {
     exit(1);
 }
 
-static void
+static void 
 registry_global(void *data, struct wl_registry *registry,
-                uint32_t name, const char *interface, uint32_t version) {
+                            uint32_t name, const char *interface, uint32_t version) {
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         compositor = wl_registry_bind(registry, name,
-                                    &wl_compositor_interface, 4);
+                                      &wl_compositor_interface, 4);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         layer_shell = wl_registry_bind(registry, name,
-                                     &zwlr_layer_shell_v1_interface, 1);
+                                       &zwlr_layer_shell_v1_interface, 1);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         shm = wl_registry_bind(registry, name,
-                             &wl_shm_interface, 1);
+                               &wl_shm_interface, 1);
     }
 }
 
